@@ -31,7 +31,7 @@ That's why if you check the folder you may see that its just the original files.
 
 ### Note
 
-Idk how much I can attribute this to my using Arch vs to it being some oversights ("But it works on my machine" type of stuff). But with Docker being a way to avoid this type of stuff, I think its probably some oversights
+Idk how much I can attribute this to my using Arch vs to it being some oversights. With Docker being a way to avoid the "But it works on my machine" type of issues, I think its probably some oversights or some weird quirk with Arch Linux, however the kernel should be the same so I don't think that's the issue tbh.
 
 # Running the Simulator
 
