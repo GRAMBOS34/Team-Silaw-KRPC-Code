@@ -52,6 +52,10 @@ Go into your project directory and just run
 git clone https://github.com/GRAMBOS34/Team-Silaw-KRPC-Code.git
 ```
 
+I recommend using VS Code since the git integration has a UI and is less of a pain in the ass than keeping a secret token just for you to commit something.
+
+It may also be a good idea for us to have separate branches and just request a merge when we have something so that we don't break everything all at once.
+
 # Making Code
 
 Based on the documents, we're limited to editing whatever is in this directory. That's why I'm unsure of whether editing those two files is allowed, especially since I couldn't even get it running.
