@@ -4,7 +4,7 @@ the docs on the installation
 
 They should be located in `/krpc7th-simulator/docs`
 
-Should you run into some issues when building the project, I have added a `build_mods` folder where you can use the files in there to replace the respective file in the simulator directory.
+Should you run into some issues when building the project, I have added a `build_mods` folder where you can use the files in there to replace the respective file in the simulator directory
 
 # Issues I had
 
@@ -12,7 +12,7 @@ I've also kept the original scripts just in case. Although I don't exactly know 
 
 That's why if you check the folder you may see that its just the original.
 
-## Stuck at Step 12/61 of the build
+## 1. Stuck at Step 12/61 of the build
 
 - I figured out that the PLATFORM_ARG variable was initialized in the Dockerfile but no value was assigned to it.
 - I changed the bash script so it did that
