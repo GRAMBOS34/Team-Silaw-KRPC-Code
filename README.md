@@ -1,14 +1,14 @@
-# FOLLOW
-
-the docs on the installation
+# _FOLLOW THE DOCS_
 
 They should be located in `/krpc7th-simulator/docs`
 
-Should you run into some issues when building the project, I have added a `build_mods` folder where you can use the files in there to replace the respective file in the simulator directory
+I'm not going to explain how to use WSL here cus I didn't do that lmao.
+
+However, should you run into some issues when building the project, I have added a `build_mods` folder where you can use the files in there to replace the respective file in the simulator directory.
 
 # Cloning the project
 
-Go into your project directory and just run
+Open a terminal and go into your project directory and just run
 
 ```
 git clone https://github.com/GRAMBOS34/Team-Silaw-KRPC-Code.git
@@ -16,13 +16,11 @@ git clone https://github.com/GRAMBOS34/Team-Silaw-KRPC-Code.git
 
 I recommend using VS Code since the git integration has a UI and is less of a pain in the ass than keeping a secret token just for you to commit something.
 
-It may also be a good idea for us to have separate branches and just request a merge when we have something so that we don't break everything all at once.
-
 # Issues I had
 
-I've also kept the original scripts just in case. 
+I've also kept the original scripts just in case.
 
-## *Although I don't exactly know if these are violations to the rules.*
+## _Although I don't exactly know if these are violations to the rules._
 
 That's why if you check the folder you may see that its just the original files.
 
@@ -43,9 +41,9 @@ That's why if you check the folder you may see that its just the original files.
 - Yeah it normally does but this only applies to the first build
 - Just be glad you don't have to do it nearly 10 times, with each attempt taking nearly an hour, trying to solve issues 😃
 
-### Note
+## Note
 
-Idk how much I can attribute this to my using Arch vs to it being some oversights. With Docker being a way to avoid the "But it works on my machine" type of issues, I think its probably some oversights or some weird quirk with Arch Linux, however the kernel should be the same so I don't think that's the issue tbh.
+Idk how much I can attribute this to my using Arch vs to it being some oversights. With Docker being a way to avoid the "But it works on my machine" type of issues, I think its probably something that kinda just slipped or some weird quirk with Arch Linux or the version of Docker I have installed, however the kernel should be the same so I don't think that's the issue tbh.
 
 # Running the Simulator
 
@@ -60,10 +58,18 @@ And then open a browser and open `https://localhost`
 
 # Making Code
 
-Based on the documents, we're limited to editing whatever is in this directory. That's why I'm unsure of whether editing those two files is allowed, especially since I couldn't even get it running.
+Based on the docs, we're limited to editing whatever is in this directory. That's why I'm unsure of whether editing those two files is allowed, especially since I couldn't even get it running.
 
 ```
 /krpc7th-simulator/users/catkin_ws/src/krpc_user
 ```
 
-And you may also notice that you don't have a lot of the python modules. _I THINK_ it'll be fine as they probably exist within the docker image, its just that you're kind of stuck with seeing the error squiggles if you're using something like VSCode (hopefully)
+And you may also notice that you don't have a lot of the python modules. _I THINK_ it'll be fine as they probably exist within the docker image, its just that you're kind of stuck with seeing the error squiggles if you're using a proper code editor like VS Code (hopefully)
+
+# Commiting Code
+
+Just please don't stage the modified `Dockerfile.krpc-base` or the modified `build.sh` when committing
+
+or do that idk tbh we'll see what happens
+
+It may also be a good idea for us to have separate branches and just request a merge when needed so that we don't break everything all at once by accident.
