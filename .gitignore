@@ -8,5 +8,3 @@ __pycache__/
 src_local_backup/
 ff_msgs
 .vscode/
-krpc7th-simulator/docker/
-krpc7th-simulator/share/
