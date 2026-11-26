@@ -4,8 +4,6 @@ They should be located in `/krpc7th-simulator/docs`
 
 I'm not going to explain how to use WSL here cus I didn't do that lmao.
 
-However, should you run into some issues when building the project, I have added a `build_mods` folder where you can use the files in there to replace the respective file in the simulator directory.
-
 # Cloning the project
 
 Open a terminal and go into your project directory and just run
@@ -15,35 +13,6 @@ git clone https://github.com/GRAMBOS34/Team-Silaw-KRPC-Code.git
 ```
 
 I recommend using VS Code since the git integration has a UI and is less of a pain in the ass than keeping a secret token just for you to commit something.
-
-# Issues I had
-
-I've also kept the original scripts just in case.
-
-## _Although I don't exactly know if these are violations to the rules._
-
-That's why if you check the folder you may see that its just the original files.
-
-## 1. Stuck at Step 12/61 of the build
-
-- I figured out that the `PLATFORM_ARG` variable was initialized in the Dockerfile but no value was assigned to it.
-- I changed the bash script so it did that
-- **HOWEVER**, if you're using a computer using the ARM architecture, just use the original script, it might work
-- Change the `build.sh` file in the original directory to the one in the `build_mods` folder
-
-## 2. Stuck at step 54/61 of the build
-
-- I figured out that the `catkin_make` was running into issues with permissions so I explicitly changed ownership again. idk what the next touch command was for though, i just took it from gemini lmfao
-- Change the `Dockerfile.krpc-base` in the simulator directory to the one located in `/krpc7th-simulator/docker`
-
-## 3. It takes a long time
-
-- Yeah it normally does but this only applies to the first build
-- Just be glad you don't have to do it nearly 10 times, with each attempt taking nearly an hour, trying to solve issues 😃
-
-## Note
-
-Idk how much I can attribute this to my using Arch vs to it being some oversights. With Docker being a way to avoid the "But it works on my machine" type of issues, I think its probably something that kinda just slipped or some weird quirk with Arch Linux or the version of Docker I have installed, however the kernel should be the same so I don't think that's the issue tbh.
 
 # Running the Simulator
 
@@ -68,8 +37,4 @@ And you may also notice that you don't have a lot of the python modules. _I THIN
 
 # Commiting Code
 
-Just please don't stage the modified `Dockerfile.krpc-base` or the modified `build.sh` when committing
-
-or do that idk tbh we'll see what happens
-
-It may also be a good idea for us to have separate branches and just request a merge when needed so that we don't break everything all at once by accident.
+It may be a good idea for us to have separate branches and just request a merge when needed so that we don't break everything all at once by accident.
