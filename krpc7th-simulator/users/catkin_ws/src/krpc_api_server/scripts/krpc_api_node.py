@@ -10,6 +10,8 @@ from cheat_sheet_loader import CheatSheetLoader
 
 JSON_STATUS = "status"
 JSON_STATUS_START = "Mission Start"
+EVALUATE_CHECKPOINT_SERVICE = "/krpc/judge/evaluate_checkpoint"
+JUDGE_SERVICE_WAIT_SEC = 5.0
 
 # Service
 from krpc_ib2_msgs.srv import (
@@ -17,6 +19,8 @@ from krpc_ib2_msgs.srv import (
     MissionStart,
     MissionFinished,
 )
+
+from krpc_msgs.srv import EvaluateCheckpoint
 
 # Action
 from krpc_ib2_msgs.msg import (
@@ -104,6 +108,20 @@ class KrpcApiNode:
         rospy.loginfo(f"/gs/data: {msg}")
         return True, "accepted"
 
+    # Ask the judge to evaluate the checkpoint. The judge holds the call for checkpoint_hold_seconds.
+    # Final mode overrides this method.
+    def evaluate_checkpoint(self, checkpoint_id):
+        try:
+            rospy.wait_for_service(EVALUATE_CHECKPOINT_SERVICE, timeout=JUDGE_SERVICE_WAIT_SEC)
+            proxy = rospy.ServiceProxy(EVALUATE_CHECKPOINT_SERVICE, EvaluateCheckpoint)
+            res = proxy(checkpoint_id)
+        except (rospy.ROSException, rospy.ServiceException) as e:
+            if rospy.is_shutdown():
+                return False, "ros shutdown during checkpoint validation"
+            rospy.logerr(f"evaluate_checkpoint failed: {e}")
+            return False, f"judge service unavailable: {e}"
+        return res.success, res.message
+
     # ==========================================================
     # Service
     # ==========================================================
@@ -179,11 +197,8 @@ class KrpcApiNode:
         fb.status = "processing"
         self._checkpoint_server.publish_feedback(fb)
 
-        # ---- Scoring event notification
-        success, message = self.publish_event({
-            "status": "CheckPointPassed",
-            "checkpoint_id": goal.checkpoint_id
-        })
+        # ---- Judge evaluates the pose for the configured hold time (blocks until done)
+        success, message = self.evaluate_checkpoint(goal.checkpoint_id)
 
         # ---- Feedback (completed)
         fb.status = "completed"

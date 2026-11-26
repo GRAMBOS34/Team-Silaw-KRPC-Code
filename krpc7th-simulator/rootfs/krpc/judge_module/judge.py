@@ -10,10 +10,12 @@ from geometry_msgs.msg import Pose
 from std_msgs.msg import Bool
 from std_msgs.msg import String
 from ib2_msgs.msg import Navigation
+from krpc_msgs.srv import EvaluateCheckpoint, EvaluateCheckpointResponse
 import tf
 import datetime
 import os
 import threading
+import time
 import requests
 import copy
 
@@ -68,6 +70,12 @@ DEFAULT_CHECKPOINT_RADII = [0.20, 0.40, 0.60]
 DEFAULT_CHECKPOINT_SCORES = [3, 2, 1]
 
 DEFAULT_CHECKPOINT_RESULT_TOPIC = "/krpc/judge/checkpoint_result"
+EVALUATE_CHECKPOINT_SERVICE = "/krpc/judge/evaluate_checkpoint"
+DEFAULT_CHECKPOINT_HOLD_SECONDS = 1.0
+TF_PUBLISH_PERIOD_SEC = 0.2
+DEFAULT_CHECKPOINT_EVAL_HZ = 30.0
+CHECKPOINT_EVAL_HZ_KEYS = ("checkpoint_eval_hz", "CheckpointEvalHz")
+CHECKPOINT_HOLD_SECONDS_KEYS = ("checkpoint_hold_seconds", "CheckpointHoldSeconds")
 DEFAULT_GOAL_RESULT_TOPIC = "/krpc/judge/goal_result"
 JSON_SELECTED_BAND = "selected_band"
 
@@ -77,22 +85,6 @@ class CHEAT_KEY():
   CORRECT_QR_CONTENT="correct_qr_content"
   LOST_ITEMS="LostItems"
   AREA_ID="areaId"
-
-# json keys for the area config file
-# json keys for the result file
-class RESULT_KEY():
-  MISSIONTIME="Mission Time"
-  TIMESTAMP="timestamp"
-  ARRIVAL="arrival"
-  DISTANCE="distance"
-  REPORT_TRY="try"
-  REPORT_SUCCESS="success"
-
-  ROUNDING_REPORT="RoundingReport"
-  FOUND_REPORT="FoundReport"
-  CAMERA_ANGLE="cameraAngle"
-  ILLEGAL="Illegal"
-  CALC_N="TimeBonusN"
 
 class Referee():
   def __init__(self, cheatsheet_path, output_dir, result_file, finish_file, row_file, debug):
@@ -133,6 +125,14 @@ class Referee():
     self.cheat_data = self.load_json(self.cheatsheet_path)
     self._checkpoint_rules, self._checkpoint_defaults = self.load_checkpoint_rules()
     self._goal_rule = self.load_goal_rule()
+    self._checkpoint_hold_seconds = self.load_checkpoint_hold_seconds()
+    self._checkpoint_eval_hz = self.load_checkpoint_eval_hz()
+    rospy.loginfo("Checkpoint hold seconds: %.3f, eval rate: %.1f Hz",
+                  self._checkpoint_hold_seconds, self._checkpoint_eval_hz)
+    # Pose samples are collected by pose_callback while a checkpoint evaluation is active.
+    self._eval_lock = threading.Lock()
+    self._eval_session = None
+    self._last_tf_time = None
     self.judge_state = {
       "mission_started": False,
       "mission_finished": False,
@@ -157,22 +157,9 @@ class Referee():
     # Close the stream on shutdown
     rospy.on_shutdown(self.shutdown_hook)
 
-    # Scoring result JSON string
-    self.result_json = {
-                          RESULT_KEY.MISSIONTIME: {},
-                          RESULT_KEY.ROUNDING_REPORT: {
-                            RESULT_KEY.TIMESTAMP: "",
-                            RESULT_KEY.ARRIVAL: {
-                              RESULT_KEY.REPORT_TRY: False,
-                              RESULT_KEY.REPORT_SUCCESS: False,
-                            },
-                          },
-                          RESULT_KEY.FOUND_REPORT: {
-                          },
-                          RESULT_KEY.ILLEGAL: False,
-                            RESULT_KEY.CALC_N: 0,
-                            "JudgeReport": {}
-                       }
+    # Set to True when unauthorized access to the ground truth is detected
+    self.illegal = False
+    self.judgereport_json = {}
 
     # Unit vector used for estimating the approach location
     # The Int-Ball2 direction vector (1,0,0) at attitude (x,y,z) = (0,0,0), with a 4th dimension added for computation
@@ -247,6 +234,38 @@ class Referee():
       rospy.logwarn("Checkpoints definition not found in cheat_sheet. LostItems fallback is disabled.")
 
     return checkpoint_rules, defaults
+
+  # Priority: cheat_sheet > rosparam (~checkpoint_hold_seconds) > default.
+  def load_checkpoint_hold_seconds(self):
+    value = rospy.get_param("~checkpoint_hold_seconds", DEFAULT_CHECKPOINT_HOLD_SECONDS)
+    for key in CHECKPOINT_HOLD_SECONDS_KEYS:
+      if self.cheat_data.get(key) is not None:
+        value = self.cheat_data[key]
+        break
+    try:
+      seconds = float(value)
+    except (TypeError, ValueError):
+      seconds = 0.0
+    if seconds <= 0:
+      rospy.logwarn("Invalid checkpoint_hold_seconds=%r. Using default %.1f", value, DEFAULT_CHECKPOINT_HOLD_SECONDS)
+      seconds = DEFAULT_CHECKPOINT_HOLD_SECONDS
+    return seconds
+
+  # Priority: cheat_sheet > rosparam (~checkpoint_eval_hz) > default.
+  def load_checkpoint_eval_hz(self):
+    value = rospy.get_param("~checkpoint_eval_hz", DEFAULT_CHECKPOINT_EVAL_HZ)
+    for key in CHECKPOINT_EVAL_HZ_KEYS:
+      if self.cheat_data.get(key) is not None:
+        value = self.cheat_data[key]
+        break
+    try:
+      hz = float(value)
+    except (TypeError, ValueError):
+      hz = 0.0
+    if hz <= 0:
+      rospy.logwarn("Invalid checkpoint_eval_hz=%r. Using default %.1f", value, DEFAULT_CHECKPOINT_EVAL_HZ)
+      hz = DEFAULT_CHECKPOINT_EVAL_HZ
+    return hz
 
   def load_goal_rule(self):
     rule = {
@@ -430,28 +449,21 @@ class Referee():
       ]
     }
 
-  def evaluate_checkpoint_navigation(self, checkpoint_id):
-    rule = self.get_checkpoint_rule(checkpoint_id)
-    if rule is None:
-      return False, "unknown checkpoint", None
-
-    pose = self.current_pose_snapshot()
-    if pose is None:
-      return False, "navigation pose unavailable", None
-
-    # Checkpoint position is in world coordinates.
+  def resolve_checkpoint_geometry(self, rule):
     target_position = rule.get("position")
     marker_pose = rule.get("marker_pose", {})
     marker_position = marker_pose.get("position", [0, 0, 0])
-
     bands = rule.get("bands") or self._checkpoint_defaults.get("bands", [])
     if not isinstance(target_position, list) or len(target_position) < 3:
-      return False, "invalid checkpoint position", None
+      return None, "invalid checkpoint position"
     if not isinstance(marker_position, list) or len(marker_position) < 3:
-      return False, "invalid marker position", None
+      return None, "invalid marker position"
     if not bands:
-      return False, "invalid checkpoint bands", None
+      return None, "invalid checkpoint bands"
+    return (target_position, marker_position, bands), None
 
+  def evaluate_pose_sample(self, rule, geometry, pose):
+    target_position, marker_position, bands = geometry
     nav_pos = pose["position"]
     distance = self.distance_3d(nav_pos, target_position)
     distance_band = self.classify_distance_to_band(distance, bands)
@@ -481,6 +493,33 @@ class Referee():
       band_candidates.append(roll_band)
     selected_band = 0 if any(b == 0 for b in band_candidates) else min(band_candidates)
 
+    return {
+      "distance": distance,
+      "distance_band": distance_band,
+      "centering_band": centering_band,
+      "centering_angle_deg": centering_angle_deg,
+      "roll_band": roll_band,
+      "roll_angle_deg": roll_angle_deg,
+      "selected_band": selected_band,
+    }
+
+  def evaluate_checkpoint_navigation(self, checkpoint_id):
+    rule = self.get_checkpoint_rule(checkpoint_id)
+    if rule is None:
+      return False, "unknown checkpoint", None
+
+    pose = self.current_pose_snapshot()
+    if pose is None:
+      return False, "navigation pose unavailable", None
+
+    # Checkpoint position is in world coordinates.
+    geometry, error = self.resolve_checkpoint_geometry(rule)
+    if error:
+      return False, error, None
+    target_position, marker_position, _ = geometry
+
+    sample = self.evaluate_pose_sample(rule, geometry, pose)
+    selected_band = sample["selected_band"]
     detail = {
       "checkpoint_id": checkpoint_id,
       "sim_mode": self.sim_mode,
@@ -490,15 +529,76 @@ class Referee():
       "current_quaternion": pose["quaternion"],
       "target_position": target_position,
       "marker_position": marker_position,
-      "distance": distance,
-      "distance_band": distance_band,
-      "centering_band": centering_band,
-      "centering_angle_deg": centering_angle_deg,
-      "roll_band": roll_band,
-      "roll_angle_deg": roll_angle_deg,
-      "selected_band": selected_band,
     }
+    detail.update(sample)
     return selected_band > 0, "checkpoint validated" if selected_band > 0 else "checkpoint outside threshold", detail
+
+  # Evaluate every sample collected during the hold time. All samples must be inside the bands.
+  def evaluate_checkpoint_hold(self, checkpoint_id, samples, hold_seconds):
+    rule = self.get_checkpoint_rule(checkpoint_id)
+    geometry, error = self.resolve_checkpoint_geometry(rule)
+    if error:
+      return False, error, None
+    target_position, marker_position, _ = geometry
+
+    detail = {
+      "checkpoint_id": checkpoint_id,
+      "sim_mode": self.sim_mode,
+      "success": False,
+      "target_position": target_position,
+      "marker_position": marker_position,
+      "hold_seconds": hold_seconds,
+      "sample_count": len(samples),
+      "failed_samples": 0,
+      "inside_ratio": 0.0,
+      "selected_band": 0,
+    }
+    if not samples:
+      return False, "no pose samples", detail
+
+    failed_samples = 0
+    first_failure_reason = None
+    selected_band = None
+    worst_distance = 0.0
+    worst_centering_angle = None
+    worst_roll_angle = None
+    for pose in samples:
+      result = self.evaluate_pose_sample(rule, geometry, pose)
+      reasons = []
+      if result["distance_band"] == 0:
+        reasons.append("checkpoint left outermost margin")
+      if result["centering_band"] == 0:
+        reasons.append("checkpoint centering left outermost margin")
+      if result["roll_band"] == 0:
+        reasons.append("checkpoint roll left outermost margin")
+      if reasons:
+        failed_samples += 1
+        if first_failure_reason is None:
+          first_failure_reason = reasons[0]
+      if selected_band is None or result["selected_band"] < selected_band:
+        selected_band = result["selected_band"]
+      worst_distance = max(worst_distance, result["distance"])
+      if result["centering_angle_deg"] is not None:
+        worst_centering_angle = max(worst_centering_angle or 0.0, result["centering_angle_deg"])
+      if result["roll_angle_deg"] is not None:
+        worst_roll_angle = max(worst_roll_angle or 0.0, result["roll_angle_deg"])
+
+    sample_count = len(samples)
+    success = failed_samples == 0 and selected_band > 0
+    detail.update({
+      "success": success,
+      "failed_samples": failed_samples,
+      "inside_ratio": (sample_count - failed_samples) / float(sample_count),
+      "selected_band": selected_band if success else 0,
+      "worst_distance": worst_distance,
+      "worst_centering_angle_deg": worst_centering_angle,
+      "worst_roll_angle_deg": worst_roll_angle,
+      "last_position": samples[-1]["position"],
+      "last_quaternion": samples[-1]["quaternion"],
+    })
+    if success:
+      return True, "checkpoint validated", detail
+    return False, first_failure_reason or "checkpoint validation failed", detail
 
   def get_checkpoint_rule(self, checkpoint_id):
     rule = self._checkpoint_rules.get(checkpoint_id)
@@ -606,11 +706,7 @@ class Referee():
       "timestamp": goal_detail.get("timestamp") if isinstance(goal_detail, dict) else None,
     }
 
-    self.result_json["checkpoint_passed"] = checkpoint_passed
-    self.result_json["checkpoint_passed_count"] = sum(1 for passed in checkpoint_passed.values() if passed)
-    self.result_json["checkpoint_detail"] = checkpoint_detail
-
-    self.result_json["JudgeReport"] = {
+    self.judgereport_json = {
       "mission": {
         "started": self.judge_state["mission_started"],
         "finished": self.judge_state["mission_finished"],
@@ -625,8 +721,8 @@ class Referee():
 
   def build_result_output(self):
     return {
-      RESULT_KEY.ILLEGAL: bool(self.result_json.get(RESULT_KEY.ILLEGAL, False)),
-      "JudgeReport": copy.deepcopy(self.result_json.get("JudgeReport", {})),
+      "Illegal": self.illegal,
+      "JudgeReport": copy.deepcopy(self.judgereport_json),
     }
 
   def publish_checkpoint_result(self, checkpoint_id, success, selected_band=None):
@@ -696,6 +792,14 @@ class Referee():
       self.ib2_pose.orientation.z = ori[2]
       self.ib2_pose.orientation.w = ori[3]
 
+    self.collect_pose_sample(pos, ori)
+
+    # Sample every callback, but publish TF/markers at the original ~5 Hz to keep the load low.
+    now = rospy.Time.now()
+    if self._last_tf_time is not None and (now - self._last_tf_time).to_sec() < TF_PUBLISH_PERIOD_SEC:
+      return
+    self._last_tf_time = now
+
     # Convert Int-Ball2's attitude to a rotation matrix -> (A)
     rot_vec = tf.transformations.quaternion_matrix(ori)
 
@@ -725,8 +829,23 @@ class Referee():
       self.marker_tool.publish_marker(id=10, position=pos, pose=ori, color=(1,0,0), size=(0.3,0.3,0.3), marker_type=1, pose_type='qua')
       self.marker_tool.publish_marker(30, position=navcam_pos, pose=ori, color=(1,0,0), size=(5,0.01,0.01), marker_type=0, pose_type='qua')
 
-    rate = rospy.Rate(5)
-    rate.sleep()
+  # Accumulate every navigation callback pose while a checkpoint evaluation is active.
+  def collect_pose_sample(self, pos, ori):
+    with self._eval_lock:
+      session = self._eval_session
+      if session is None or session["done"].is_set():
+        return
+      now = rospy.Time.now()
+      # Time-based decimation to the evaluation rate; the hold window itself is never shortened.
+      last = session["last_sample_time"]
+      if last is None or (now - last).to_sec() >= 1.0 / self._checkpoint_eval_hz:
+        session["last_sample_time"] = now
+        session["samples"].append({
+          "position": [float(v) for v in pos],
+          "quaternion": [float(v) for v in ori],
+        })
+      if now >= session["end_time"]:
+        session["done"].set()
 
   # Periodically save Int-Ball2's self-position
   def save_pose_to_file(self):
@@ -756,7 +875,7 @@ class Referee():
   def illegal_callback(self, data):
 
     # Set illegal to true when unauthorized access to the ground truth is detected
-    self.result_json[RESULT_KEY.ILLEGAL] = True
+    self.illegal = True
     rospy.logwarn('Illegal detection msg is recieved.')
     self.output_result()
 
@@ -791,9 +910,6 @@ class Referee():
       # START
       self.judge_start(timestamp)
 
-    elif(status == JSON_STATUS_CHECKPOINT):
-      self.judge_checkpoint_passed(timestamp, data)
-
     #elif(status == UNDOCK_START):
     #  self.judge_undock()
 
@@ -817,8 +933,6 @@ class Referee():
   # Processing on receipt of the START API
   def judge_start(self, timestamp):
     if(not self.gameHasStarted):
-      self.result_json[RESULT_KEY.MISSIONTIME]["start"] = timestamp # in milli seconds"
-
       self.judge_state["mission_started"] = True
       self.judge_state["mission_start_ros_time"] = timestamp
       self.judge_state["events"].append({
@@ -840,29 +954,66 @@ class Referee():
     else:
       rospy.logwarn('JudgeSendStart has already called.')
 
-  def judge_checkpoint_passed(self, timestamp, data):
-    if not self.gameHasStarted:
-      rospy.logwarn('checkpoint event received before mission start')
-      return
-    if self.finishflag:
-      rospy.logwarn('checkpoint event received after mission finish')
-      return
+  # Collect poses for the hold time. Returns None if another evaluation is already running.
+  def collect_hold_samples(self, hold_seconds, wait_for_idle=False):
+    session = {
+      "samples": [],
+      "last_sample_time": None,
+      "done": threading.Event(),
+      "end_time": None,
+    }
+    deadline = time.time() + hold_seconds * 2.0
+    while True:
+      with self._eval_lock:
+        if self._eval_session is None:
+          session["end_time"] = rospy.Time.now() + rospy.Duration.from_sec(hold_seconds)
+          self._eval_session = session
+          break
+      if not wait_for_idle or time.time() >= deadline:
+        return None
+      time.sleep(0.05)
 
-    checkpoint_id = data.get("checkpoint_id")
-    if checkpoint_id is None:
-      rospy.logwarn('checkpoint event missing checkpoint_id')
-      return
+    # Fallback timeout in case navigation stops arriving.
+    session["done"].wait(hold_seconds * 2.0)
+    with self._eval_lock:
+      self._eval_session = None
+      return list(session["samples"])
+
+  # Service handler: collect poses for the hold time, then judge all samples.
+  def handle_evaluate_checkpoint(self, req):
+    checkpoint_id = req.checkpoint_id
+
+    def respond(success, message, band=0):
+      return EvaluateCheckpointResponse(success=success, message=message, selected_band=band)
+
+    if not self.gameHasStarted:
+      return respond(False, "mission not started")
+    if self.finishflag:
+      return respond(False, "mission already finished")
 
     checkpoint_key = str(checkpoint_id)
-    if checkpoint_key in self.judge_state["checkpoints"]:
-      rospy.logwarn('checkpoint {} already processed'.format(checkpoint_id))
-      return
+    previous = self.judge_state["checkpoints"].get(checkpoint_key)
+    if previous and previous.get("success"):
+      return respond(False, "checkpoint already passed: {}".format(checkpoint_id))
+    if self.get_checkpoint_rule(checkpoint_id) is None:
+      return respond(False, "unknown checkpoint_id: {}".format(checkpoint_id))
 
-    success, reason, detail = self.evaluate_checkpoint_navigation(checkpoint_id)
-    event_detail = detail if isinstance(detail, dict) else {"reason": reason}
+    hold_seconds = self._checkpoint_hold_seconds
+    samples = self.collect_hold_samples(hold_seconds)
+    if samples is None:
+      return respond(False, "checkpoint evaluation in progress")
+
+    if self.finishflag:
+      return respond(False, "mission already finished")
+
+    timestamp = datetime.datetime.fromtimestamp(rospy.Time.now().to_sec()).strftime("%Y%m%d %H%M%S%f")[:-3]
+    success, reason, detail = self.evaluate_checkpoint_hold(checkpoint_id, samples, hold_seconds)
+    event_detail = detail if isinstance(detail, dict) else {"checkpoint_id": checkpoint_id, "success": False}
     event_detail["timestamp"] = timestamp
     event_detail["reason"] = reason
     self.judge_state["checkpoints"][checkpoint_key] = event_detail
+    rospy.loginfo("checkpoint {} evaluated: samples={} hold={}s success={}".format(
+      checkpoint_id, len(samples), hold_seconds, success))
     self.judge_state["events"].append({
       "status": JSON_STATUS_CHECKPOINT,
       "timestamp": timestamp,
@@ -871,11 +1022,16 @@ class Referee():
       "reason": reason,
     })
     self.sync_judge_report()
-    selected_band = None
-    if isinstance(event_detail, dict):
-      selected_band = event_detail.get(JSON_SELECTED_BAND)
+    selected_band = event_detail.get(JSON_SELECTED_BAND) or 0
     self.publish_checkpoint_result(checkpoint_id, success, selected_band)
     self.output_result()
+
+    if success:
+      return respond(True, "checkpoint accepted: band={}".format(selected_band), selected_band)
+    rospy.logwarn("checkpoint {} rejected: {} (samples={}, inside_ratio={})".format(
+      checkpoint_id, reason, len(samples), event_detail.get("inside_ratio")))
+    return respond(False, reason)
+
   #def judge_undock(self):
   #  if(not self.gameHasStarted):
   #    if self.ib2HasMoved:
@@ -892,44 +1048,41 @@ class Referee():
       return
 
     goal_checkpoint_id = self._goal_rule.get("checkpoint_id")
-    checkpoint_key = str(goal_checkpoint_id)
-    existing_detail = self.judge_state["checkpoints"].get(checkpoint_key)
-    if isinstance(existing_detail, dict) and existing_detail.get("success", False):
-      success = True
-      reason = "goal checkpoint previously passed"
-      detail = copy.deepcopy(existing_detail)
-      detail["previously_passed"] = True
-      detail["evaluated_at_finish"] = False
-    elif self.get_checkpoint_rule(goal_checkpoint_id) is None:
+    if self.get_checkpoint_rule(goal_checkpoint_id) is None:
       success = False
       reason = "goal checkpoint_id is not configured or unknown"
       detail = {"goal_checkpoint_id": goal_checkpoint_id}
     else:
-      success, reason, detail = self.evaluate_checkpoint_navigation(goal_checkpoint_id)
+      # Goal uses the same hold-time rule as checkpoints, evaluated at finish.
+      hold_seconds = self._checkpoint_hold_seconds
+      samples = self.collect_hold_samples(hold_seconds, wait_for_idle=True)
+      if samples is None:
+        success, reason, detail = False, "checkpoint evaluation in progress", None
+      else:
+        success, reason, detail = self.evaluate_checkpoint_hold(goal_checkpoint_id, samples, hold_seconds)
       detail = detail if isinstance(detail, dict) else {"reason": reason}
       detail["goal_checkpoint_id"] = goal_checkpoint_id
-      detail["previously_passed"] = False
       detail["evaluated_at_finish"] = True
-      if success:
-        self.judge_state["checkpoints"][checkpoint_key] = detail
+
+      # Goal succeeds only if the goal point is valid AND all checkpoints (including the goal CP) have passed.
+      passed_map = self.build_checkpoint_passed_map()
+      failed_checkpoints = [cp for cp, ok in passed_map.items() if not ok]
+      all_checkpoints_passed = not failed_checkpoints
+
+      position_ok = success
+      success = position_ok and all_checkpoints_passed
+      detail["success"] = success
+
+      if position_ok and not all_checkpoints_passed:
+        reason = "checkpoints not passed: {}".format(",".join(failed_checkpoints))
 
     goal_detail = detail if isinstance(detail, dict) else {"reason": reason}
     goal_detail["timestamp"] = timestamp
     goal_detail["reason"] = reason
     self.judge_state["goal"] = goal_detail
-    self.result_json[RESULT_KEY.ROUNDING_REPORT][RESULT_KEY.TIMESTAMP] = timestamp
-    self.result_json[RESULT_KEY.ROUNDING_REPORT][RESULT_KEY.ARRIVAL][RESULT_KEY.REPORT_TRY] = True
-    self.result_json[RESULT_KEY.ROUNDING_REPORT][RESULT_KEY.ARRIVAL][RESULT_KEY.REPORT_SUCCESS] = success
-    self.result_json[RESULT_KEY.ROUNDING_REPORT][RESULT_KEY.ARRIVAL][RESULT_KEY.DISTANCE] = goal_detail.get("distance", 0)
     self.publish_goal_result(success)
 
     self.finishflag = 1
-    self.result_json[RESULT_KEY.MISSIONTIME]["finish"] = timestamp # in milli seconds"
-    self.result_json[RESULT_KEY.FOUND_REPORT][RESULT_KEY.TIMESTAMP] = timestamp # in milli seconds"
-    self.result_json[RESULT_KEY.FOUND_REPORT][RESULT_KEY.CAMERA_ANGLE] = 0
-    self.result_json[RESULT_KEY.FOUND_REPORT][RESULT_KEY.DISTANCE] = 0
-    self.result_json[RESULT_KEY.FOUND_REPORT][RESULT_KEY.REPORT_TRY] = self.judge_state["goal"] is not None
-    self.result_json[RESULT_KEY.FOUND_REPORT][RESULT_KEY.REPORT_SUCCESS] = bool(self.judge_state["goal"] and self.judge_state["goal"].get("success"))
     self.judge_state["mission_finished"] = True
     self.judge_state["mission_finish_ros_time"] = timestamp
     self.judge_state["events"].append({
@@ -1030,6 +1183,7 @@ if __name__ == '__main__':
   rospy.Subscriber("/gs/data", String, referee.judge_callback, queue_size=20)
   rospy.Subscriber("/sensor_fusion/navigation", Navigation, referee.pose_callback, queue_size=1)
   rospy.Subscriber("/krpc/comm/illegal", Bool, referee.illegal_callback, queue_size=3)
+  rospy.Service(EVALUATE_CHECKPOINT_SERVICE, EvaluateCheckpoint, referee.handle_evaluate_checkpoint)
 
   # Wait briefly (for subscribers to connect)
   r = rospy.Rate(5)

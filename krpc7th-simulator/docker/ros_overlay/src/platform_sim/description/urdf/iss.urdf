@@ -1,5 +1,8 @@
 <?xml version="1.0" ?>
 <robot name="iss">
+  <gazebo reference="iss_body">
+    <turnGravityOff>true</turnGravityOff>
+  </gazebo>
   <link name="base"/>
   <link name="iss_body">
     <inertial>

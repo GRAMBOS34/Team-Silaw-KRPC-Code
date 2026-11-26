@@ -54,6 +54,23 @@ class CheatSheetLoader:
         normalized["checkpoint_id"] = goal.get("checkpoint_id")
         return normalized
 
+    HOLD_SECONDS_KEYS = ("checkpoint_hold_seconds", "CheckpointHoldSeconds")
+
+    def checkpoint_hold_seconds(self, default):
+        """Resolve the hold time: cheat_sheet value, otherwise the given default."""
+        for key in self.HOLD_SECONDS_KEYS:
+            value = self.data.get(key)
+            if value is None:
+                continue
+            try:
+                seconds = float(value)
+            except (TypeError, ValueError):
+                raise ValueError("{} must be a number".format(key))
+            if seconds <= 0:
+                raise ValueError("{} must be positive".format(key))
+            return seconds
+        return float(default)
+
     def checkpoint_payload(self):
         checkpoints = []
         for item in self.checkpoints:

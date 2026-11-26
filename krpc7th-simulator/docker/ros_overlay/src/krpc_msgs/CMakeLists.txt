@@ -12,6 +12,11 @@ add_message_files(
   QrReport.msg
 )
 
+add_service_files(
+  FILES
+  EvaluateCheckpoint.srv
+)
+
 generate_messages(
   DEPENDENCIES
   std_msgs 

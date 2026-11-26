@@ -57,6 +57,9 @@ JUDGE_LOG=${WORK_DIR}/judge.log
 SYSTEM_LOG=${WORK_DIR}/system.log
 ROSBAG_LOG=${WORK_DIR}/rosbag.log
 FINISH_REPORT=${WORK_DIR}/finish_report
+# Host-visible flag (share is mounted from the host) set when /ib2_user/start was not delivered.
+START_ABORT_FLAG=/tmp/share/start_not_delivered
+START_CONFIRM_TIMEOUT=60
 STATUS_INDICATOR_LOG=${WORK_DIR}/status_indicator.log
 FLIGHT_RECORDER_LOG=${WORK_DIR}/flight_recorder.log
 
@@ -366,7 +369,7 @@ watch_dog(){
     # while timer < playTimeSec
     while [ ${timer} -lt ${playTimeSec} ]
     do
-        if [ -e ${FINISH_REPORT} ]; then
+        if [ -e ${FINISH_REPORT} ] || [ -e ${START_ABORT_FLAG} ]; then
             break
         fi
         sleep 1s
@@ -609,7 +612,32 @@ go() {
     done
     logging $LABEL_INFO "IB2 is ready"
     logging $LABEL_INFO "Go"
-    rostopic pub --once /ib2_user/start platform_msgs/UserLogic "id: 0" &>> ${SYSTEM_LOG} &
+    # Latched publisher: a subscriber connecting late still receives the message.
+    rostopic pub -l /ib2_user/start platform_msgs/UserLogic "id: 0" &>> ${SYSTEM_LOG} &
+    local start_pub_pid=$!
+
+    if wait_for_start_delivery ${START_CONFIRM_TIMEOUT}; then
+        logging $LABEL_INFO "game is running"
+    else
+        logging $LABEL_ERROR "/ib2_user/start was not delivered to /krpc_user within ${START_CONFIRM_TIMEOUT}s. Aborting."
+        touch ${START_ABORT_FLAG}
+    fi
+    sleep 1
+    kill ${start_pub_pid} &>> ${SYSTEM_LOG} || true
+}
+
+# Returns 0 once /krpc_user has an inbound connection on /ib2_user/start.
+wait_for_start_delivery() {
+    local timeout=${1:-60}
+    local waited=0
+    until rosnode info /krpc_user 2>/dev/null | grep -q 'topic: /ib2_user/start'; do
+        if [ ${waited} -ge ${timeout} ]; then
+            return 1
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 0
 }
 
 kill_user() {

@@ -104,6 +104,12 @@ SAFE_AREA_MARKER_NS = "safe_area"
 SAFE_AREA_COLOR = (1.0, 0.85, 0.1)
 SAFE_AREA_LINE_WIDTH = 0.02
 
+DIRECTION_MARKER_NS = "checkpoint_direction"
+DIRECTION_CONE_LENGTH = 0.4
+DIRECTION_CONE_SEGMENTS = 32
+DIRECTION_CONE_COLOR = (1.0, 1.0, 1.0)
+DIRECTION_CONE_ALPHA = 0.5
+
 checkpoint_info = {
     "passed": [False] * CHECKPOINT_COUNT,
     "active": [True] * CHECKPOINT_COUNT,
@@ -325,10 +331,29 @@ def load_checkpoint_markers(cheat_sheet_path):
         if not band_radii:
             band_radii = list(DEFAULT_MARKER_RADII)
 
+        # Direction the camera must face: from the checkpoint toward the target marker.
+        look_dir = None
+        cone_half_angle = None
+        attitude = cp.get("attitude")
+        marker_position = marker_pose.get("position") if isinstance(marker_pose, dict) else None
+        if (
+            isinstance(attitude, dict)
+            and isinstance(marker_position, list)
+            and len(marker_position) >= 3
+            and all(isinstance(v, (int, float)) for v in marker_position[:3])
+        ):
+            diff = [float(marker_position[i]) - float(position_world[i]) for i in range(3)]
+            norm = math.sqrt(sum(d * d for d in diff))
+            cone_half_angle = lv3_centering_angle(attitude.get("centering_bands"))
+            if norm > 1e-6 and cone_half_angle is not None:
+                look_dir = [d / norm for d in diff]
+
         markers.append({
             "id": int(checkpoint_id),
             "position": [float(position_world[0]), float(position_world[1]), float(position_world[2])],
             "band_radii": band_radii,
+            "look_dir": look_dir,
+            "cone_half_angle": cone_half_angle,
         })
 
     markers.sort(key=lambda x: x["id"])
@@ -482,6 +507,72 @@ def make_marker_topic(checkpoint_marker, band_index, visible, passed_highlight=F
         marker.color.a = 0.3
         marker.type = Marker.SPHERE
 
+    return marker
+
+
+def lv3_centering_angle(centering_bands):
+    """Half angle [deg] of the Lv3 centering band (largest angle if no level 3)."""
+    if not isinstance(centering_bands, list):
+        return None
+    angles = {}
+    for band in centering_bands:
+        if not isinstance(band, dict):
+            continue
+        angle = band.get("angle", band.get("margin", band.get("threshold")))
+        level = band.get("level", band.get("score", band.get("point", band.get("points"))))
+        if isinstance(angle, (int, float)) and 0.0 < angle < 90.0:
+            angles[level] = float(angle)
+    if not angles:
+        return None
+    return angles.get(3, max(angles.values()))
+
+
+def make_direction_cone(checkpoint_marker):
+    marker = Marker()
+    marker.header.frame_id = "iss_body"
+    marker.header.stamp = rospy.Time.now()
+    marker.ns = DIRECTION_MARKER_NS
+    marker.id = checkpoint_marker["id"]
+    marker.type = Marker.TRIANGLE_LIST
+    marker.action = Marker.ADD
+    marker.pose.orientation.w = 1.0
+    marker.scale.x = marker.scale.y = marker.scale.z = 1.0
+    marker.color.r = DIRECTION_CONE_COLOR[0]
+    marker.color.g = DIRECTION_CONE_COLOR[1]
+    marker.color.b = DIRECTION_CONE_COLOR[2]
+    marker.color.a = DIRECTION_CONE_ALPHA
+
+    apex = checkpoint_marker["position"]
+    axis = checkpoint_marker["look_dir"]
+    radius = DIRECTION_CONE_LENGTH * math.tan(math.radians(checkpoint_marker["cone_half_angle"]))
+
+    # Orthonormal basis (u, v) perpendicular to the cone axis
+    helper = [0.0, 0.0, 1.0] if abs(axis[2]) < 0.9 else [1.0, 0.0, 0.0]
+    u = [axis[1] * helper[2] - axis[2] * helper[1],
+         axis[2] * helper[0] - axis[0] * helper[2],
+         axis[0] * helper[1] - axis[1] * helper[0]]
+    u_norm = math.sqrt(sum(c * c for c in u))
+    u = [c / u_norm for c in u]
+    v = [axis[1] * u[2] - axis[2] * u[1],
+         axis[2] * u[0] - axis[0] * u[2],
+         axis[0] * u[1] - axis[1] * u[0]]
+
+    center = [apex[i] + axis[i] * DIRECTION_CONE_LENGTH for i in range(3)]
+    ring = []
+    for k in range(DIRECTION_CONE_SEGMENTS):
+        t = 2.0 * math.pi * k / DIRECTION_CONE_SEGMENTS
+        ring.append([center[i] + radius * (math.cos(t) * u[i] + math.sin(t) * v[i]) for i in range(3)])
+
+    def pt(ds):
+        g = ds_to_gazebo(ds)
+        return Point(x=g[0], y=g[1], z=g[2])
+
+    # Both windings so the cone is visible from either side
+    for k in range(DIRECTION_CONE_SEGMENTS):
+        a = ring[k]
+        b = ring[(k + 1) % DIRECTION_CONE_SEGMENTS]
+        for tri in ((apex, a, b), (apex, b, a), (center, a, b), (center, b, a)):
+            marker.points.extend(pt(p) for p in tri)
     return marker
 
 
@@ -715,6 +806,9 @@ def main():
             band_count = len(checkpoint_marker["band_radii"])
             if band_count <= 0:
                 continue
+
+            if checkpoint_marker["look_dir"] is not None:
+                marker_pub.publish(make_direction_cone(checkpoint_marker))
 
             passed = False
             if 1 <= checkpoint_id <= CHECKPOINT_COUNT:

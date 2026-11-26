@@ -1,0 +1,5 @@
+int32 checkpoint_id
+---
+bool success
+string message
+int32 selected_band

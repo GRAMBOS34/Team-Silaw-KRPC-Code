@@ -36,7 +36,7 @@ services:
         volumes:
             - /dev/shm:/dev/shm
             - ./share:/tmp/share
-            - ./users:/users
+            - ${USERS_DIR_OVERRIDE:-./users}:/users
         networks:
             - krpc
         environment:
