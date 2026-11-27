@@ -8,7 +8,7 @@ NO_CACHE=""
 for arg in "$@"; do
     case "$arg" in
         --no-cache) NO_CACHE="--no-cache" ;;
-        --arm64) PLATFORM="linux/arm64"; BASE_TAG="bionic-arm64" ;;
+        --arm64) PLATFORM="linux/arm64"; BASE_TAG="focal-arm64" ;;
         --platform=*) PLATFORM="${arg#*=}" ;;
         *) echo "[build.sh] unknown option: $arg"; exit 1 ;;
     esac
