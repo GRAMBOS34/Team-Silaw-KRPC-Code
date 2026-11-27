@@ -22,8 +22,7 @@ fi
 
 # Build base simulator image. If remote base pull fails, allow fallback only when
 # a local krpc/intball-simulator:latest image already exists.
-# ! Modified by adding --build-arg TARGETARCH=amd64
-if docker build $NO_CACHE $PLATFORM_ARG --build-arg BASE_TAG=${BASE_TAG} --build-arg TARGETARCH=amd64 -t krpc/intball-simulator:latest -f docker/Dockerfile.krpc-base .; then
+if docker build $NO_CACHE $PLATFORM_ARG --build-arg BASE_TAG=${BASE_TAG} -t krpc/intball-simulator:latest -f docker/Dockerfile.krpc-base .; then
 	echo "[build.sh] built krpc/intball-simulator:latest"
 else
 	echo "[build.sh] WARN: failed to build krpc/intball-simulator:latest"
@@ -35,6 +34,5 @@ else
 	fi
 fi
 
-# ! Modified by adding --build-arg TARGETARCH=amd64
-docker build $NO_CACHE $PLATFORM_ARG --build-arg TARGETARCH=amd64 -t krpc/krpc-replay:latest -f docker/Dockerfile.krpc-replay .
+docker build $NO_CACHE $PLATFORM_ARG -t krpc/krpc-replay:latest -f docker/Dockerfile.krpc-replay .
 echo "[build.sh] built krpc/krpc-replay:latest"
