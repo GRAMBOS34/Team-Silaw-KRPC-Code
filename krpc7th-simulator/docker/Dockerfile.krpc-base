@@ -205,12 +205,14 @@ USER $USER
 COPY --chown=$USER:$USER docker/ros_python3_overlay/src/ /home/$USER/ros_python3_ws/src/
 
 WORKDIR $HOME/ros_python3_ws
+# ! Modified - added line 210 and 212
 RUN set -e; \
+    sudo chown -R $USER:$USER /home/$USER/ros_python3_ws; \
     ln -sf /opt/ros/melodic/share/catkin/cmake/toplevel.cmake "$HOME/ros_python3_ws/src/CMakeLists.txt"; \
     touch "$HOME/ros_python3_ws/src/vision_opencv/opencv_tests/CATKIN_IGNORE"; \
     source /opt/ros/melodic/setup.bash; \
     source "$HOME/catkin_ws/devel/setup.bash"; \
-    catkin_make -DPYTHON_EXECUTABLE=/usr/bin/python3 -DOpenCV_DIR=/usr/local/share/OpenCV
+    catkin_make -DPYTHON_EXECUTABLE=/usr/bin/python3 -DOpenCV_DIR=/usr/local/share/OpenCV ;
 
 WORKDIR $HOME/catkin_ws
 
